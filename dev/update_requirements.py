@@ -56,7 +56,8 @@ def main():
 
     with open(args.requirements_yaml_location) as f:
         requirements_src = f.read()
-        requirements = yaml.load(requirements_src)
+        # Use safe_load to prevent arbitrary code execution
+        requirements = yaml.safe_load(requirements_src)
 
     for key, req_info in requirements.items():
         pip_release = req_info["pip_release"]

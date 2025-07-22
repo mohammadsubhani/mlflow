@@ -10,6 +10,70 @@ from typing import Any, Callable, Optional
 _logger = logging.getLogger(__name__)
 
 
+def _validate_function_name(func_name: str) -> bool:
+    """Validate that func_name is a safe Python identifier."""
+    if not func_name.isidentifier():
+        return False
+    # Ensure it's not a Python keyword or builtin
+    import keyword
+    if keyword.iskeyword(func_name) or func_name in dir(__builtins__):
+        return False
+    return True
+
+
+def _validate_function_signature(signature: str) -> bool:
+    """Validate that the signature is safe and properly formatted."""
+    try:
+        # Try to parse as a function signature
+        test_func = f"def test_func{signature}: pass"
+        ast.parse(test_func)
+        return True
+    except SyntaxError:
+        return False
+
+
+def _validate_function_source(source: str) -> bool:
+    """Validate that the source code is safe Python code."""
+    try:
+        # Parse the source to ensure it's valid Python
+        ast.parse(source)
+        
+        # Check for dangerous operations
+        tree = ast.parse(source)
+        
+        class DangerousNodeVisitor(ast.NodeVisitor):
+            def __init__(self):
+                self.has_dangerous_nodes = False
+                
+            def visit_Import(self, node):
+                # Allow only specific safe imports
+                for alias in node.names:
+                    if not alias.name.startswith(('mlflow.', 'numpy', 'pandas')):
+                        self.has_dangerous_nodes = True
+                self.generic_visit(node)
+                
+            def visit_ImportFrom(self, node):
+                # Allow only mlflow imports
+                if node.module and not node.module.startswith('mlflow'):
+                    self.has_dangerous_nodes = True
+                self.generic_visit(node)
+                
+            def visit_Call(self, node):
+                # Check for dangerous function calls
+                if isinstance(node.func, ast.Name):
+                    dangerous_funcs = {'exec', 'eval', '__import__', 'compile', 'open'}
+                    if node.func.id in dangerous_funcs:
+                        self.has_dangerous_nodes = True
+                self.generic_visit(node)
+        
+        visitor = DangerousNodeVisitor()
+        visitor.visit(tree)
+        return not visitor.has_dangerous_nodes
+        
+    except SyntaxError:
+        return False
+
+
 # FunctionBodyExtractor class is forked from https://github.com/unitycatalog/unitycatalog/blob/20dd3820be332ac04deec4e063099fb863eb3392/ai/core/src/unitycatalog/ai/core/utils/callable_utils.py
 class FunctionBodyExtractor(ast.NodeVisitor):
     """
@@ -85,6 +149,19 @@ def recreate_function(source: str, signature: str, func_name: str) -> Optional[C
         The recreated function or None if recreation failed.
     """
     try:
+        # Validate inputs to prevent code injection
+        if not _validate_function_name(func_name):
+            _logger.error(f"Invalid function name: {func_name}")
+            return None
+            
+        if not _validate_function_signature(signature):
+            _logger.error(f"Invalid function signature: {signature}")
+            return None
+            
+        if not _validate_function_source(source):
+            _logger.error("Invalid or potentially dangerous function source code")
+            return None
+
         # Parse the signature to build the function definition
         sig_match = re.match(r"\((.*?)\)", signature)
         if not sig_match:
@@ -98,8 +175,26 @@ def recreate_function(source: str, signature: str, func_name: str) -> Optional[C
         indented_source = "\n".join(f"    {line}" for line in source.split("\n"))
         func_def += indented_source
 
-        # Create a namespace with common MLflow imports that scorer functions might use
-        import_namespace = {}
+        # Create a restricted namespace with only allowed MLflow imports
+        import_namespace = {
+            '__builtins__': {
+                # Only allow safe builtins
+                'len': len,
+                'str': str,
+                'int': int,
+                'float': float,
+                'bool': bool,
+                'list': list,
+                'dict': dict,
+                'tuple': tuple,
+                'set': set,
+                'range': range,
+                'enumerate': enumerate,
+                'zip': zip,
+                'isinstance': isinstance,
+                'type': type,
+            }
+        }
 
         # Import commonly used MLflow classes
         try:
@@ -133,6 +228,6 @@ def recreate_function(source: str, signature: str, func_name: str) -> Optional[C
         # Return the recreated function
         return local_namespace[func_name]
 
-    except Exception:
-        _logger.warning(f"Failed to recreate function '{func_name}' from serialized source code")
+    except Exception as e:
+        _logger.warning(f"Failed to recreate function '{func_name}' from serialized source code: {e}")
         return None

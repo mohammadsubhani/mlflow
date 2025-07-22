@@ -20,10 +20,14 @@ def _is_delta_table(table_name: str) -> bool:
     spark = SparkSession.builder.getOrCreate()
 
     try:
+        # Validate and sanitize table name to prevent SQL injection
+        # Use backtick quoting to safely handle table names with special characters
+        safe_table_name = _backtick_quote(table_name)
+        
         # use DESCRIBE DETAIL to check if the table is a Delta table
         # https://docs.databricks.com/delta/delta-utility.html#describe-detail
         # format will be `delta` for delta tables
-        spark.sql(f"DESCRIBE DETAIL {table_name}").filter("format = 'delta'").count()
+        spark.sql(f"DESCRIBE DETAIL {safe_table_name}").filter("format = 'delta'").count()
         return True
     except AnalysisException:
         return False
